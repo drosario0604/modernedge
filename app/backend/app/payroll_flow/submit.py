@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import logging
 import uuid
 from decimal import Decimal
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.callouts.rules import CodedAbsence
@@ -18,6 +20,30 @@ from app.config import Settings, get_settings
 from app.models import AuditLog, ExceptionRecord, PayrollSubmission, ReviewItem
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_source_ref(item: CodedAbsence) -> str:
+    """Never persist a blank source_ref — it breaks the unique (source, source_ref) key."""
+    raw = (item.source_ref or "").strip()
+    if raw:
+        return raw[:128]
+    digest = hashlib.sha1(
+        f"{item.source}|{item.event_date.isoformat()}|{item.hr_employee_id}|"
+        f"{item.payroll_employee_id}|{item.code}|{item.reason}".encode("utf-8")
+    ).hexdigest()[:12]
+    return f"{item.event_date.isoformat()}-{digest}"[:128]
+
+
+def _with_ref(item: CodedAbsence) -> CodedAbsence:
+    ref = _stable_source_ref(item)
+    if ref == item.source_ref:
+        return item
+    # dataclasses-style / plain object: mutate if possible
+    try:
+        object.__setattr__(item, "source_ref", ref)
+    except Exception:
+        item.source_ref = ref  # type: ignore[attr-defined]
+    return item
 
 SUBMISSION_COLUMNS = [
     "source",
@@ -156,185 +182,98 @@ def submit_absences(
 
     rows: list[dict[str, Any]] = []
     try:
-        for item in coded:
-            if item.decision_hint == "skip" or not item.code:
-                if item.decision_hint == "skip":
-                    continue
-                # unresolved code
-                row = _hold(
-                    session,
-                    item,
-                    reason=item.reason or "Missing code or unresolved employee",
-                    dry_run=is_dry,
-                )
-                rows.append(row)
-                continue
-
-            existing = _existing_local(session, item.source, item.source_ref)
-            if existing is not None:
-                rows.append(_row_from_submission(existing))
-                _audit(
-                    session,
-                    action="payroll.skip_existing_local",
-                    entity_type="payroll_submission",
-                    entity_id=str(existing.id),
-                    detail={"source": item.source, "source_ref": item.source_ref},
-                )
-                continue
-
-            # Confidence / review gate
-            if item.decision_hint == "review" or item.confidence < CONFIDENCE_FLOOR:
-                row = _hold(
-                    session,
-                    item,
-                    reason=item.reason or "Held for review (low confidence or ambiguous coding)",
-                    dry_run=is_dry,
-                )
-                rows.append(row)
-                continue
-
-            if item.payroll_employee_id is None:
-                row = _hold(
-                    session,
-                    item,
-                    reason="No payroll employee_id mapped",
-                    dry_run=is_dry,
-                )
-                rows.append(row)
-                continue
-
-            date_str = item.event_date.isoformat()
-
-            # Idempotency against payroll system of record
-            if not is_dry:
-                prior = _payroll_has_absence(
-                    payroll,
-                    payroll_employee_id=item.payroll_employee_id,
-                    absence_date=date_str,
-                )
-                if prior is not None:
-                    sub = PayrollSubmission(
-                        source=item.source,
-                        source_ref=item.source_ref,
-                        employee_id=item.employee_id,
-                        payroll_employee_id=item.payroll_employee_id,
-                        absence_date=item.event_date,
-                        code=item.code,
-                        hours=item.hours,
-                        note=item.reason[:500] if item.reason else None,
-                        decision="written",
-                        submission_id=str(prior.get("submission_id") or ""),
-                        final_status=str(prior.get("status") or "EXISTS"),
-                        reason="Idempotent skip: absence already in payroll",
-                        dry_run=False,
-                        response_payload=prior,
-                    )
-                    session.add(sub)
-                    _audit(
-                        session,
-                        action="payroll.skip_existing_remote",
-                        entity_type="absence",
-                        entity_id=str(prior.get("submission_id")),
-                        detail={"employee_id": item.payroll_employee_id, "date": date_str},
-                    )
-                    session.flush()
-                    rows.append(_row_from_submission(sub))
-                    continue
-
-            payload = {
-                "employee_id": item.payroll_employee_id,
-                "date": date_str,
-                "code": item.code,
-                "hours": float(item.hours),
-                "note": (item.reason or "")[:240] or None,
-            }
-
-            if is_dry:
-                fake_id = f"DRY-{uuid.uuid4().hex[:10].upper()}"
-                sub = PayrollSubmission(
-                    source=item.source,
-                    source_ref=item.source_ref,
-                    employee_id=item.employee_id,
-                    payroll_employee_id=item.payroll_employee_id,
-                    absence_date=item.event_date,
-                    code=item.code,
-                    hours=item.hours,
-                    note=item.reason[:500] if item.reason else None,
-                    decision="written",
-                    submission_id=fake_id,
-                    final_status="DRY_RUN",
-                    reason=item.reason or "Dry-run submission",
-                    dry_run=True,
-                    request_payload=payload,
-                    response_payload={"submission_id": fake_id, "status": "DRY_RUN"},
-                )
-                session.add(sub)
-                _audit(
-                    session,
-                    action="payroll.dry_run_write",
-                    entity_type="absence",
-                    entity_id=fake_id,
-                    detail=payload,
-                )
-                session.flush()
-                rows.append(_row_from_submission(sub))
-                continue
-
-            # Live write with client-level 503 retries
+        for raw_item in coded:
+            item = _with_ref(raw_item)
             try:
-                response = payroll.post_absence(
-                    employee_id=item.payroll_employee_id,
-                    date=date_str,
-                    code=item.code,
-                    hours=float(item.hours),
-                    note=payload["note"],
-                )
-            except PayrollUnavailableError as exc:
-                row = _hold(
+                row = _submit_one(
                     session,
                     item,
-                    reason=f"Payroll unavailable after retries: {exc}",
-                    dry_run=False,
+                    payroll=payroll,
+                    is_dry=is_dry,
+                    poll_final_status=poll_final_status,
                 )
-                _audit(
-                    session,
-                    action="payroll.write_failed_503",
-                    entity_type="absence",
-                    entity_id=None,
-                    detail=payload,
-                    success=False,
+                if row is not None:
+                    rows.append(row)
+            except IntegrityError:
+                session.rollback()
+                existing = _existing_local(session, item.source, item.source_ref)
+                if existing is not None:
+                    rows.append(_row_from_submission(existing))
+                    continue
+                # Last resort: uniquify ref and retry once as hold
+                item.source_ref = f"{item.source_ref}-{uuid.uuid4().hex[:6]}"[:128]
+                rows.append(
+                    _hold(
+                        session,
+                        item,
+                        reason=item.reason or "Retry after unique constraint",
+                        dry_run=is_dry,
+                    )
                 )
-                rows.append(row)
-                continue
-            except PayrollAPIError as exc:
-                row = _hold(
-                    session,
-                    item,
-                    reason=f"Payroll API error: {exc}",
-                    dry_run=False,
-                )
-                _audit(
-                    session,
-                    action="payroll.write_failed",
-                    entity_type="absence",
-                    entity_id=None,
-                    detail={"payload": payload, "error": str(exc)},
-                    success=False,
-                )
-                rows.append(row)
-                continue
 
-            submission_id = str(response.get("submission_id") or "")
-            final_status = str(response.get("status") or "RECEIVED")
+        session.commit()
+    finally:
+        if owns_client:
+            payroll.close()
 
-            if poll_final_status and submission_id:
-                try:
-                    detail = payroll.get_absence(submission_id)
-                    final_status = str(detail.get("status") or final_status)
-                    response = detail
-                except Exception as exc:  # noqa: BLE001
-                    logger.info("Could not poll submission %s: %s", submission_id, exc)
+    return rows
 
+
+def _submit_one(
+    session: Session,
+    item: CodedAbsence,
+    *,
+    payroll: PayrollClient,
+    is_dry: bool,
+    poll_final_status: bool,
+) -> dict[str, Any] | None:
+    if item.decision_hint == "skip":
+        return None
+
+    if not item.code:
+        return _hold(
+            session,
+            item,
+            reason=item.reason or "Missing code or unresolved employee",
+            dry_run=is_dry,
+        )
+
+    existing = _existing_local(session, item.source, item.source_ref)
+    if existing is not None:
+        _audit(
+            session,
+            action="payroll.skip_existing_local",
+            entity_type="payroll_submission",
+            entity_id=str(existing.id),
+            detail={"source": item.source, "source_ref": item.source_ref},
+        )
+        return _row_from_submission(existing)
+
+    if item.decision_hint == "review" or item.confidence < CONFIDENCE_FLOOR:
+        return _hold(
+            session,
+            item,
+            reason=item.reason or "Held for review (low confidence or ambiguous coding)",
+            dry_run=is_dry,
+        )
+
+    if item.payroll_employee_id is None:
+        return _hold(
+            session,
+            item,
+            reason="No payroll employee_id mapped",
+            dry_run=is_dry,
+        )
+
+    date_str = item.event_date.isoformat()
+
+    if not is_dry:
+        prior = _payroll_has_absence(
+            payroll,
+            payroll_employee_id=item.payroll_employee_id,
+            absence_date=date_str,
+        )
+        if prior is not None:
             sub = PayrollSubmission(
                 source=item.source,
                 source_ref=item.source_ref,
@@ -345,30 +284,138 @@ def submit_absences(
                 hours=item.hours,
                 note=item.reason[:500] if item.reason else None,
                 decision="written",
-                submission_id=submission_id,
-                final_status=final_status,
-                reason=item.reason,
+                submission_id=str(prior.get("submission_id") or ""),
+                final_status=str(prior.get("status") or "EXISTS"),
+                reason="Idempotent skip: absence already in payroll",
                 dry_run=False,
-                request_payload=payload,
-                response_payload=response if isinstance(response, dict) else {"raw": response},
+                response_payload=prior,
             )
             session.add(sub)
             _audit(
                 session,
-                action="payroll.write",
+                action="payroll.skip_existing_remote",
                 entity_type="absence",
-                entity_id=submission_id,
-                detail={"payload": payload, "response": response},
+                entity_id=str(prior.get("submission_id")),
+                detail={"employee_id": item.payroll_employee_id, "date": date_str},
             )
             session.flush()
-            rows.append(_row_from_submission(sub))
+            return _row_from_submission(sub)
 
-        session.commit()
-    finally:
-        if owns_client:
-            payroll.close()
+    payload = {
+        "employee_id": item.payroll_employee_id,
+        "date": date_str,
+        "code": item.code,
+        "hours": float(item.hours),
+        "note": (item.reason or "")[:240] or None,
+    }
 
-    return rows
+    if is_dry:
+        fake_id = f"DRY-{uuid.uuid4().hex[:10].upper()}"
+        sub = PayrollSubmission(
+            source=item.source,
+            source_ref=item.source_ref,
+            employee_id=item.employee_id,
+            payroll_employee_id=item.payroll_employee_id,
+            absence_date=item.event_date,
+            code=item.code,
+            hours=item.hours,
+            note=item.reason[:500] if item.reason else None,
+            decision="written",
+            submission_id=fake_id,
+            final_status="DRY_RUN",
+            reason=item.reason or "Dry-run submission",
+            dry_run=True,
+            request_payload=payload,
+            response_payload={"submission_id": fake_id, "status": "DRY_RUN"},
+        )
+        session.add(sub)
+        _audit(
+            session,
+            action="payroll.dry_run_write",
+            entity_type="absence",
+            entity_id=fake_id,
+            detail=payload,
+        )
+        session.flush()
+        return _row_from_submission(sub)
+
+    try:
+        response = payroll.post_absence(
+            employee_id=item.payroll_employee_id,
+            date=date_str,
+            code=item.code,
+            hours=float(item.hours),
+            note=payload["note"],
+        )
+    except PayrollUnavailableError as exc:
+        _audit(
+            session,
+            action="payroll.write_failed_503",
+            entity_type="absence",
+            entity_id=None,
+            detail=payload,
+            success=False,
+        )
+        return _hold(
+            session,
+            item,
+            reason=f"Payroll unavailable after retries: {exc}",
+            dry_run=False,
+        )
+    except PayrollAPIError as exc:
+        _audit(
+            session,
+            action="payroll.write_failed",
+            entity_type="absence",
+            entity_id=None,
+            detail={"payload": payload, "error": str(exc)},
+            success=False,
+        )
+        return _hold(
+            session,
+            item,
+            reason=f"Payroll API error: {exc}",
+            dry_run=False,
+        )
+
+    submission_id = str(response.get("submission_id") or "")
+    final_status = str(response.get("status") or "RECEIVED")
+
+    if poll_final_status and submission_id:
+        try:
+            detail = payroll.get_absence(submission_id)
+            final_status = str(detail.get("status") or final_status)
+            response = detail
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Could not poll submission %s: %s", submission_id, exc)
+
+    sub = PayrollSubmission(
+        source=item.source,
+        source_ref=item.source_ref,
+        employee_id=item.employee_id,
+        payroll_employee_id=item.payroll_employee_id,
+        absence_date=item.event_date,
+        code=item.code,
+        hours=item.hours,
+        note=item.reason[:500] if item.reason else None,
+        decision="written",
+        submission_id=submission_id,
+        final_status=final_status,
+        reason=item.reason,
+        dry_run=False,
+        request_payload=payload,
+        response_payload=response if isinstance(response, dict) else {"raw": response},
+    )
+    session.add(sub)
+    _audit(
+        session,
+        action="payroll.write",
+        entity_type="absence",
+        entity_id=submission_id,
+        detail={"payload": payload, "response": response},
+    )
+    session.flush()
+    return _row_from_submission(sub)
 
 
 def _hold(
@@ -378,6 +425,11 @@ def _hold(
     reason: str,
     dry_run: bool,
 ) -> dict[str, Any]:
+    item = _with_ref(item)
+    existing = _existing_local(session, item.source, item.source_ref)
+    if existing is not None:
+        return _row_from_submission(existing)
+
     _enqueue_review(session, item, reason=reason)
     session.add(
         ExceptionRecord(
