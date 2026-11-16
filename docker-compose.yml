@@ -1,0 +1,92 @@
+# App stack. Start mock_systems separately (or use --profile mocks).
+#
+#   cd assessment_package/ModernEdge_AI_Solutions_Engineer_Assessment/mock_systems
+#   docker compose up --build
+#   docker compose up --build   # this file
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: modernedge
+      POSTGRES_PASSWORD: modernedge
+      POSTGRES_DB: modernedge
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./app/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U modernedge -d modernedge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./app/backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://modernedge:modernedge@postgres:5432/modernedge
+      DATA_DIR: /data
+      OUTPUT_DIR: /output
+      PAYROLL_URL: http://host.docker.internal:8081
+      DISPATCH_URL: http://host.docker.internal:8082
+      FINANCE_URL: http://host.docker.internal:8083
+      PAYROLL_DRY_RUN: ${PAYROLL_DRY_RUN:-true}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000,http://frontend:80
+    volumes:
+      - ./assessment_package/ModernEdge_AI_Solutions_Engineer_Assessment/data:/data:ro
+      - ./output:/output
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./app/frontend
+    ports:
+      - "5173:80"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+
+  payroll:
+    profiles: ["mocks"]
+    build:
+      context: ./assessment_package/ModernEdge_AI_Solutions_Engineer_Assessment/mock_systems
+    command: uvicorn app:app --app-dir payroll --host 0.0.0.0 --port 8081
+    ports:
+      - "8081:8081"
+    volumes:
+      - payroll_data:/data
+
+  dispatch:
+    profiles: ["mocks"]
+    build:
+      context: ./assessment_package/ModernEdge_AI_Solutions_Engineer_Assessment/mock_systems
+    command: uvicorn app:app --app-dir dispatch --host 0.0.0.0 --port 8082
+    ports:
+      - "8082:8082"
+
+  finance:
+    profiles: ["mocks"]
+    build:
+      context: ./assessment_package/ModernEdge_AI_Solutions_Engineer_Assessment/mock_systems
+    command: uvicorn app:app --app-dir finance --host 0.0.0.0 --port 8083
+    ports:
+      - "8083:8083"
+
+volumes:
+  postgres_data:
+  payroll_data:

@@ -1,0 +1,6 @@
+source,record_ref,issue,action_taken,confidence
+paf,PAF_scan_223394.pdf,"PAF OCR failed: OpenAI PAF OCR needs pdf2image/poppler to rasterize scanned PDFs, or provide PNG. Rasterize error: Unable to get page count. Is poppler installed and in PATH?",Flagged for manual review; roster not updated,0.2000
+paf,PAF_scan_489006.pdf,"PAF OCR failed: OpenAI PAF OCR needs pdf2image/poppler to rasterize scanned PDFs, or provide PNG. Rasterize error: Unable to get page count. Is poppler installed and in PATH?",Flagged for manual review; roster not updated,0.2000
+paf,PAF_scan_721704.pdf,"PAF OCR failed: OpenAI PAF OCR needs pdf2image/poppler to rasterize scanned PDFs, or provide PNG. Rasterize error: Unable to get page count. Is poppler installed and in PATH?",Flagged for manual review; roster not updated,0.2000
+paf,PAF_scan_818853.pdf,"PAF OCR failed: OpenAI PAF OCR needs pdf2image/poppler to rasterize scanned PDFs, or provide PNG. Rasterize error: Unable to get page count. Is poppler installed and in PATH?",Flagged for manual review; roster not updated,0.2000
+resolve_buildings,Float Pool,Finance site 'Float Pool' unmatched to contract building,GL/invoice lines may need manual building link,0.5000

@@ -1,0 +1,10 @@
+COVERAGE BACKUP NOTE
+Client:            Corlett Asset Management
+Building:          Corlett Building
+Date of service:   10/20/2026
+Shift:             Day
+Position covered:  Cleaner
+Coverage:          Replacement provided
+Billable hours:    8.00
+Billable amount:   $558.84
+Posting reference: P-1020-040

@@ -1,0 +1,20 @@
+# The client's three systems, as ModernEdge can reach them.
+#   Payroll  http://localhost:8081   (system of record for absences)
+#   Dispatch http://localhost:8082   (shift posting app)
+#   Finance  http://localhost:8083   (ERP reporting interface)
+services:
+  payroll:
+    build: .
+    command: uvicorn app:app --app-dir payroll --host 0.0.0.0 --port 8081
+    ports: ["8081:8081"]
+    volumes: ["payroll-data:/data"]
+  dispatch:
+    build: .
+    command: uvicorn app:app --app-dir dispatch --host 0.0.0.0 --port 8082
+    ports: ["8082:8082"]
+  finance:
+    build: .
+    command: uvicorn app:app --app-dir finance --host 0.0.0.0 --port 8083
+    ports: ["8083:8083"]
+volumes:
+  payroll-data:

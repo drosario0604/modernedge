@@ -1,0 +1,7 @@
+building,contracted_headcount,active_headcount,headcount_variance,scheduled_shifts,callout_shifts,callout_rate,fill_rate,overtime_hours,overtime_dollars,revenue,labor_cost,gross_margin,gross_margin_pct,unbilled_coverage_count,unbilled_coverage_dollars
+Bramwell Annex,6,6,0,132,0,0,0.7,8.00,304.20,38900.00,8084.87,30815.13,0.792163,0,0.00
+Bramwell House,7,8,1,159,0,0,0.555556,0.00,0.00,48900.00,5683.23,43216.77,0.883779,0,0.00
+Corlett Building,11,10,-1,220,0,0,0.916667,48.00,1937.40,67035.88,4722.85,62313.03,0.929547,6,2015.31
+Halcyon Tower,11,10,-1,227,0,0,0.9,24.00,951.00,72812.80,4934.64,67878.16,0.932228,0,0.00
+Meridian One,12,11,-1,242,0,0,1,24.00,912.60,77648.68,5446.32,72202.36,0.929859,4,1210.41
+Meridian Plaza,8,8,0,176,0,0,0.923077,0.00,0.00,50288.67,7328.16,42960.51,0.854278,3,748.63
